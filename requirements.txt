@@ -3,3 +3,5 @@ uvicorn
 gunicorn
 pandas
 python-multipart
+PyPDF2
+rapidfuzz
