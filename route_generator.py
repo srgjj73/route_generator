@@ -1,21 +1,24 @@
 from __future__ import annotations
 import os
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import pandas as pd
 from PyPDF2 import PdfReader
 from rapidfuzz import fuzz, process as rf_process
 from datetime import datetime
 
-# Настройки парсинга/сопоставления
-ADDRESS_COL = "address"          # столбец со справочными адресами
-MIN_FUZZ = 80                      # порог похожести (0..100)
-CITY_HINTS = []                    # сюда можно добавить город/регион для фильтрации
+# Порог похожести для fuzzy‑сопоставления
+MIN_FUZZ = 80
 
-# Простейший паттерн адреса: строка с улицей + номером. Подгоняйте под ваш формат.
-# Примеры ловушек: "ул.", "улица", "просп.", "проспект", "ш.", "шоссе", "пер.", "переулок"
-ADDR_RE = re.compile(r"\b(ул\.|улица|просп\.|проспект|ш\.|шоссе|пер\.|переулок|туп\.|б-р|бульвар|наб\.|набережная|пл\.|площадь|дорога|улиц)\s+[^\n,]+?(?:,?\s*д\.?\s*\d+[A-Za-zА-Яа-я/-]*)?", re.IGNORECASE)
+# Регэкспы для извлечения адресов из PDF (подправьте под свой формат при необходимости)
+ADDR_RE = re.compile(r"\b(ул\.|улица|просп\.|проспект|ш\.|шоссе|пер\.|переулок|туп\.|б-р|бульвар|наб\.|набережная|пл\.|площадь|дорога|улиц|street|st\.|ave\.|avenue|road|rd\.|blvd\.|lane|ln\.)\s+[^\n,]+?(?:,?\s*д\.?\s*\d+[A-Za-zА-Яа-я/-]*)?", re.IGNORECASE)
+
+# Возможные названия колонки адреса (разные языки/варианты)
+ADDRESS_CANDIDATES = [
+    "address", "адрес", "адреса", "addr", "street", "улица", "улиц", "stop address", "location",
+    "address1", "address_line", "address_line1", "addr1"
+]
 
 
 def read_pdf_text(pdf_path: str) -> str:
@@ -28,20 +31,13 @@ def read_pdf_text(pdf_path: str) -> str:
 
 
 def extract_addresses(text: str) -> List[str]:
-    """Достаём кандидатов адресов из текста PDF."""
     candidates = set()
-    # По строкам — иногда адрес на одной строке
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        # Фильтр по подсказкам города (опционально)
-        if CITY_HINTS and not any(h.lower() in line.lower() for h in CITY_HINTS):
-            pass  # не отбрасываем жёстко — просто продолжаем
-        # Регэксп по типам улиц
         for m in ADDR_RE.finditer(line):
             candidates.add(normalize_addr(m.group(0)))
-    # fallback: если ничего не нашли — пробуем все непустые строки
     if not candidates:
         for line in text.splitlines():
             line = line.strip()
@@ -53,24 +49,62 @@ def extract_addresses(text: str) -> List[str]:
 def normalize_addr(s: str) -> str:
     s = s.strip()
     s = re.sub(r"\s+", " ", s)
-    # уберём хвостовые запятые/точки
-    s = s.strip(",. ")
-    return s
+    return s.strip(",. ")
 
 
-def match_addresses(pdf_addrs: List[str], ref_df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    """Для каждого адреса из PDF ищем лучший матч в справочнике (ADDRESS_COL) по fuzzy."""
-    if ADDRESS_COL not in ref_df.columns:
-        raise ValueError(f"В справочнике нет столбца '{ADDRESS_COL}'")
+def _norm_name(name: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]", "", name.lower())
 
-    ref_addrs = ref_df[ADDRESS_COL].astype(str).fillna("")
+
+def detect_address_col(df: pd.DataFrame) -> Optional[str]:
+    cols = list(df.columns)
+    norm_map = {c: _norm_name(str(c)) for c in cols}
+    cand_norms = [_norm_name(x) for x in ADDRESS_CANDIDATES]
+
+    # 1) Точное совпадение по нормализованному имени
+    for c, n in norm_map.items():
+        if n in cand_norms:
+            return c
+
+    # 2) Подстрока: если колонка содержит 'address'/'адрес'/'street'
+    for c, n in norm_map.items():
+        if any(key in n for key in ["address", "адрес", "street", "улиц", "location"]):
+            return c
+
+    # 3) Heuristic: берём первую текстовую колонку со средними значениями длины > 8
+    for c in cols:
+        if df[c].dtype == object:
+            sample = df[c].astype(str).dropna()
+            if not sample.empty and sample.str.len().mean() > 8:
+                return c
+
+    return None
+
+
+def read_csv_robust(path: str) -> pd.DataFrame:
+    # Пытаемся автоматически определить разделитель/кодировку
+    # 1) sep=None + engine='python' часто угадывает , ; \t
+    try:
+        return pd.read_csv(path, sep=None, engine='python')
+    except Exception:
+        pass
+    # 2) Явно через ';'
+    try:
+        return pd.read_csv(path, sep=';')
+    except Exception:
+        pass
+    # 3) Кома
+    return pd.read_csv(path)
+
+
+def match_addresses(pdf_addrs: List[str], ref_df: pd.DataFrame, address_col: str) -> Tuple[pd.DataFrame, List[str]]:
+    ref_addrs = ref_df[address_col].astype(str).fillna("")
     ref_list = ref_addrs.tolist()
 
     rows = []
     not_found = []
 
     for idx, addr in enumerate(pdf_addrs, start=1):
-        # rapidfuzz отдаёт список лучших совпадений
         best = rf_process.extractOne(addr, ref_list, scorer=fuzz.WRatio)
         if best:
             best_str, score, ref_idx = best
@@ -89,7 +123,6 @@ def match_addresses(pdf_addrs: List[str], ref_df: pd.DataFrame) -> Tuple[pd.Data
             not_found.append(addr)
 
     out_df = pd.DataFrame(rows)
-    # Если в справочнике есть столбцы lat/lon — оставим их как есть. Иначе просто адреса/метаданные.
     return out_df, not_found
 
 
@@ -99,22 +132,29 @@ def process_route(pdf_path: str, ref_path: str, output_dir: str) -> dict:
     # 1) Текст из PDF
     text = read_pdf_text(pdf_path)
 
-    # 2) Извлечь адреса
+    # 2) Адреса из PDF
     pdf_addresses = extract_addresses(text)
 
-    # 3) Загрузить справочник
-    ref_df = pd.read_csv(ref_path)
+    # 3) Справочник — устойчивое чтение
+    ref_df = read_csv_robust(ref_path)
 
-    # 4) Сопоставить
-    out_df, not_found = match_addresses(pdf_addresses, ref_df)
+    # 4) Автодетект колонки адреса
+    addr_col = detect_address_col(ref_df)
+    if not addr_col:
+        raise ValueError(
+            "Не удалось определить колонку с адресами. Переименуйте нужную колонку в 'address' или 'Адрес'"
+            f". Найдены колонки: {list(ref_df.columns)}"
+        )
 
-    # 5) Сохранить CSV
+    # 5) Сопоставление
+    out_df, not_found = match_addresses(pdf_addresses, ref_df, addr_col)
+
+    # 6) Сохранение результата
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_csv_name = f"route_{stamp}.csv"
     out_csv_path = os.path.join(output_dir, out_csv_name)
 
-    # Удобный порядок столбцов
-    preferred_cols = ["order", "source_addr", "match", "score", ADDRESS_COL, "lat", "lon"]
+    preferred_cols = ["order", "source_addr", "match", "score", addr_col, "lat", "lon"]
     cols = [c for c in preferred_cols if c in out_df.columns] + [c for c in out_df.columns if c not in preferred_cols]
     (out_df[cols] if not out_df.empty else out_df).to_csv(out_csv_path, index=False)
 
