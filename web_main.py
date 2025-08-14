@@ -42,7 +42,7 @@ for d in (UPLOAD_DIR, OUTPUT_DIR, REF_DIR):
 # === Память справочников ===
 known_refs = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
 
-# === Общие стили/скрипты (НЕ f-строки!) ===
+# === Общие стили/скрипты (без f-строк и format) ===
 BASE_CSS = """
 <style>
   :root { --btn:#0d6efd; --btn2:#6c757d; --ok:#28a745; }
@@ -72,8 +72,8 @@ BASE_JS = """
   function debounce(fn,ms){let t;return function(){clearTimeout(t);const a=arguments;const ctx=this;t=setTimeout(()=>fn.apply(ctx,a),ms)}}
   function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
   function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
-  function bindTap(id,handler){const el=document.getElementById(id);if(!el)return;el.addEventListener('click',e=>{e.preventDefault();handler(e)},{passive:false});el.addEventListener('touchstart',e=>{e.preventDefault();handler(e)},{passive:false})}
   function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
+  function escapeRegex(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}
 </script>
 """
 
@@ -85,7 +85,7 @@ def list_references():
     known_refs = set(r for r in known_refs if os.path.exists(os.path.join(REF_DIR, r)))
     return sorted(known_refs)
 
-# === Шаблоны ===
+# === Главная
 def render_index(last_error=None, last_result=None):
     refs = list_references()
     refs_options = "".join([f"<option value='{html.escape(r)}'>{html.escape(r)}</option>" for r in refs])
@@ -104,22 +104,28 @@ def render_index(last_error=None, last_result=None):
         not_found_html = "<br>".join(html.escape(x) for x in last_result.get("not_found", [])) or "Все записи найдены."
         filename = os.path.basename(last_result["output_file"])
         filename_q = quote(filename)
-        result_block = """
+        # без format и f-строк — подставим потом .replace(...)
+        result_block_tpl = """
         <div class='result'>
           <h2>Результат генерации</h2>
-          <p>Найдено: <b>{found}</b> из <b>{total}</b></p>
+          <p>Найдено: <b>{FOUND}</b> из <b>{TOTAL}</b></p>
           <h3>Не найдено</h3>
-          <p>{not_found}</p>
+          <p>{NOT_FOUND}</p>
           <div class='row'>
-            <button type='button' onclick="location.href='/edit_route/{file_q}'">✏ Редактировать</button>
-            <a class='nowrap' href="/download/{file_q}" download><button type='button' class='btn-ok'>📥 Скачать CSV</button></a>
+            <button type='button' onclick="location.href='/edit_route/{FILE_Q}'">✏ Редактировать</button>
+            <a class='nowrap' href="/download/{FILE_Q}" download><button type='button' class='btn-ok'>📥 Скачать CSV</button></a>
           </div>
         </div>
-        """.format(found=last_result['found_count'], total=last_result['total_count'], not_found=not_found_html, file_q=filename_q)
+        """
+        result_block = (result_block_tpl
+                        .replace("{FOUND}", str(last_result['found_count']))
+                        .replace("{TOTAL}", str(last_result['total_count']))
+                        .replace("{NOT_FOUND}", not_found_html)
+                        .replace("{FILE_Q}", filename_q))
 
-    return """
+    page_tpl = """
     <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-      {css}{js}
+      {CSS}{JS}
     </head>
     <body>
       <div class='container'>
@@ -128,16 +134,16 @@ def render_index(last_error=None, last_result=None):
           <label>Транспортный лист (PDF):</label>
           <input type='file' name='pdf_file' accept='.pdf' required>
           <label>Выберите справочник:</label>
-          <select name='reference_file' required>{refs_options}</select>
+          <select name='reference_file' required>{REFS_OPTIONS}</select>
           <button type='submit'>Сгенерировать маршрут</button>
         </form>
 
-        {error_block}
-        {result_block}
+        {ERROR_BLOCK}
+        {RESULT_BLOCK}
 
         <hr>
         <h2>Справочники</h2>
-        <ul>{refs_list}</ul>
+        <ul>{REFS_LIST}</ul>
 
         <h3>Добавить справочник</h3>
         <form action='/upload_reference' method='post' enctype='multipart/form-data'>
@@ -147,7 +153,15 @@ def render_index(last_error=None, last_result=None):
         </form>
       </div>
     </body></html>
-    """.format(css=BASE_CSS, js=BASE_JS, refs_options=refs_options, error_block=error_block, result_block=result_block or "", refs_list=refs_list_html or '<span class=muted>Пока нет загруженных CSV</span>')
+    """
+    return (page_tpl
+            .replace("{CSS}", BASE_CSS)
+            .replace("{JS}", BASE_JS)
+            .replace("{REFS_OPTIONS}", refs_options)
+            .replace("{ERROR_BLOCK}", error_block)
+            .replace("{RESULT_BLOCK}", result_block or "")
+            .replace("{REFS_LIST}", refs_list_html or '<span class=muted>Пока нет загруженных CSV</span>')
+            )
 
 # === Роуты ===
 @app.get("/", response_class=HTMLResponse)
@@ -187,6 +201,7 @@ async def process(pdf_file: UploadFile = File(...), reference_file: str = Form(.
         logger.exception("Route generation failed")
         return HTMLResponse(render_index(last_error=f"{type(e).__name__}: {e}\n\n" + traceback.format_exc()))
 
+# === Редактор справочника
 @app.get("/view_reference/{filename:path}", response_class=HTMLResponse)
 async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     try:
@@ -197,14 +212,11 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
         header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
         rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
         table_html = "<table id='csvTable'>" + header + rows + "</table>"
-        page = """
+
+        page_tpl = """
         <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-        {css}{js}
+        {CSS}{JS}
         <script>
-          function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
-          function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
-          function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
-          function escapeRegex(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}
           function searchTable(){
             const q = document.getElementById('search').value.toLowerCase();
             const rows = document.querySelectorAll('#csvTable tr');
@@ -224,8 +236,13 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
           }
           async function saveCSV(){
             document.querySelectorAll('#csvTable td').forEach(td=>{ clearMarks(td); });
-            const csv = tableToCSV('csvTable');
-            const res = await fetch('/save_reference/{name_q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
+            const rows = Array.from(document.querySelectorAll('#csvTable tr'));
+            const csv = rows.map(r=>Array.from(r.children).map(td=>{
+              let v = (td.innerText||'');
+              if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+              return v;
+            }).join(',')).join('\\n');
+            const res = await fetch('/save_reference/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
             if(res.ok) alert('Справочник сохранён'); else alert('Не удалось сохранить');
           }
           document.addEventListener('DOMContentLoaded', function(){
@@ -243,11 +260,18 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
             <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
-            <h2>Редактирование: {name_h}</h2>
-            {table}
+            <h2>Редактирование: {NAME_H}</h2>
+            {TABLE}
           </div>
         </body></html>
-        """.format(css=BASE_CSS, js=BASE_JS, name_q=quote(filename), name_h=html.escape(unquote(filename)), table=table_html)
+        """
+        page = (page_tpl
+                .replace("{CSS}", BASE_CSS)
+                .replace("{JS}", BASE_JS)
+                .replace("{NAME_Q}", quote(filename))
+                .replace("{NAME_H}", html.escape(unquote(filename)))
+                .replace("{TABLE}", table_html)
+                )
         return HTMLResponse(page)
     except Exception as e:
         return HTMLResponse(f"<pre>Ошибка: {html.escape(str(e))}</pre>")
@@ -260,6 +284,7 @@ async def save_reference(filename: str, request: Request, _: HTTPBasicCredential
         f.write(body)
     return {"status": "ok"}
 
+# === Редактор маршрута
 @app.get("/edit_route/{filename:path}", response_class=HTMLResponse)
 async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     try:
@@ -270,20 +295,23 @@ async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
         header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
         rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
         table_html = "<table id='routeTable'>" + header + rows + "</table>"
-        page = """
+
+        page_tpl = """
         <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-        {css}{js}
+        {CSS}{JS}
         <script>
-          function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
-          function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
-          function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
           function downloadEdited(){
             document.querySelectorAll('#routeTable td').forEach(td=>{ clearMarks(td); });
-            const csv = tableToCSV('routeTable');
+            const rows = Array.from(document.querySelectorAll('#routeTable tr'));
+            const csv = rows.map(r=>Array.from(r.children).map(td=>{
+              let v = (td.innerText||'');
+              if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+              return v;
+            }).join(',')).join('\\n');
             const blob = new Blob(['\\ufeff'+csv], { type:'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.style.display='none'; a.href=url; a.download='{name_h}';
+            a.style.display='none'; a.href=url; a.download='{NAME_H}';
             document.body.appendChild(a); a.click();
             setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 500);
           }
@@ -295,15 +323,22 @@ async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
             <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
-            <h2>Редактирование маршрута: {name_h}</h2>
-            {table}
+            <h2>Редактирование маршрута: {NAME_H}</h2>
+            {TABLE}
           </div>
         </body></html>
-        """.format(css=BASE_CSS, js=BASE_JS, name_h=html.escape(unquote(filename)), table=table_html)
+        """
+        page = (page_tpl
+                .replace("{CSS}", BASE_CSS)
+                .replace("{JS}", BASE_JS)
+                .replace("{NAME_H}", html.escape(unquote(filename)))
+                .replace("{TABLE}", table_html)
+                )
         return HTMLResponse(page)
     except Exception as e:
         return HTMLResponse(f"<pre>Ошибка: {html.escape(str(e))}</pre>")
 
+# === Скачать
 @app.get("/download/{filename:path}")
 async def download(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     file_path = os.path.join(OUTPUT_DIR, unquote(filename))
