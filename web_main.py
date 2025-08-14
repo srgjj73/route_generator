@@ -39,47 +39,52 @@ REF_DIR = os.path.join(BASE_DIR, "data", "references")
 for d in (UPLOAD_DIR, OUTPUT_DIR, REF_DIR):
     os.makedirs(d, exist_ok=True)
 
-# === «Память» справочников (живёт пока работает процесс) ===
+# === Память справочников ===
 known_refs = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
 
-# === Вспомогалки ===
 def list_references():
-    # объединяем кэш с диском: что-то удалили вручную — не потеряемся
     disk = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
     global known_refs
     known_refs |= disk
-    # фильтр на случай лишних файлов
     known_refs = set(r for r in known_refs if os.path.exists(os.path.join(REF_DIR, r)))
     return sorted(known_refs)
 
-# === Шаблоны страниц ===
-def base_css():
-    return """
-    <style>
-      :root { --btn: #0d6efd; --btn2:#6c757d; --ok:#28a745; }
-      body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin:0; padding:16px; font-size:16px; }
-      .container { max-width: 900px; margin:0 auto; }
-      input, button, select { margin: 8px 0; padding: 14px; font-size: 18px; width: 100%; box-sizing:border-box; }
-      button { background: var(--btn); color:#fff; border:none; border-radius:12px; box-shadow: 0 2px 6px rgba(0,0,0,.1); }
-      button:hover { filter: brightness(0.95); }
-      .btn-secondary { background: var(--btn2); }
-      .btn-ok { background: var(--ok); }
-      .bar { position: sticky; top:0; background:#fff; padding:10px; z-index:5; display:flex; gap:10px; align-items:center; box-shadow:0 2px 8px rgba(0,0,0,.06); }
-      .row { display:flex; gap:10px; }
-      @media (max-width: 640px){ .row { flex-direction: column; } }
-      .result { border:2px solid #ccc; border-radius:12px; padding:16px; background:#f9f9f9; margin-top:16px; }
-      .error { border-color:#d33; background:#fff2f2; }
-      table { border-collapse: collapse; width: 100%; font-size:16px; }
-      th, td { padding: 10px; border: 1px solid #ddd; white-space: nowrap; }
-      th { background: #f0f0f0; position: sticky; top: 64px; z-index: 2; }
-      .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef; margin:4px 0; font-size:14px; }
-      .danger { background:#fee; }
-      .muted { color:#666; font-size:14px; }
-      .nowrap { white-space:nowrap; }
-      mark { background: yellow; padding:0 2px; }
-    </style>
-    """
+# === Общие стили/скрипты ===
+BASE_CSS = """
+<style>
+  :root { --btn:#0d6efd; --btn2:#6c757d; --ok:#28a745; }
+  body{font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;margin:0;padding:16px;font-size:16px}
+  .container{max-width:900px;margin:0 auto}
+  input,button,select{margin:8px 0;padding:14px;font-size:18px;width:100%;box-sizing:border-box}
+  button{background:var(--btn);color:#fff;border:none;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.1)}
+  button:hover{filter:brightness(.95)}
+  .btn-secondary{background:var(--btn2)}
+  .btn-ok{background:var(--ok)}
+  .bar{position:sticky;top:0;background:#fff;padding:10px;z-index:5;display:flex;gap:10px;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+  .row{display:flex;gap:10px}
+  @media (max-width:640px){.row{flex-direction:column}}
+  .result{border:2px solid #ccc;border-radius:12px;padding:16px;background:#f9f9f9;margin-top:16px}
+  .error{border-color:#d33;background:#fff2f2}
+  table{border-collapse:collapse;width:100%;font-size:16px}
+  th,td{padding:10px;border:1px solid #ddd;white-space:nowrap}
+  th{background:#f0f0f0;position:sticky;top:64px;z-index:2}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef;margin:4px 0;font-size:14px}
+  .muted{color:#666;font-size:14px}
+  mark{background:yellow;padding:0 2px}
+</style>
+"""
 
+BASE_JS = """
+<script>
+  // Debounce для мобильного ввода
+  function debounce(fn,ms){let t;return function(){clearTimeout(t);const a=arguments;const ctx=this;t=setTimeout(()=>fn.apply(ctx,a),ms)}}
+  function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\n'))v='"'+v.replaceAll('"','""')+'"';return v}
+  function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\n')}
+  function bindTap(el,handler){el.addEventListener('click',e=>{e.preventDefault();handler(e)},{passive:false});el.addEventListener('touchstart',e=>{e.preventDefault();handler(e)},{passive:false})}
+</script>
+"""
+
+# === Рендер главной ===
 
 def render_index(last_error=None, last_result=None):
     refs = list_references()
@@ -87,7 +92,8 @@ def render_index(last_error=None, last_result=None):
     refs_list_html = "".join([
         f"<li><span class='pill'>{html.escape(r)}</span> "
         f"<a href='/view_reference/{quote(r)}'>✏ Редактировать</a> "
-        f"<button class='btn-secondary' onclick=\"delRef('{quote(r)}')\">🗑 Удалить</button></li>"
+        f"<form style='display:inline' method='post' action='/delete_reference/{quote(r)}'>"
+        f"<button type='submit' class='btn-secondary'>🗑 Удалить</button></form></li>"
         for r in refs
     ])
 
@@ -105,22 +111,15 @@ def render_index(last_error=None, last_result=None):
           <h3>Не найдено</h3>
           <p>{not_found_html}</p>
           <div class='row'>
-            <button onclick=\"location.href='/edit_route/{filename_q}'\">✏ Редактировать</button>
-            <a class='nowrap' href='/download/{filename_q}' download><button class='btn-ok'>📥 Скачать CSV</button></a>
+            <button type='button' onclick=\"location.href='/edit_route/{filename_q}'\">✏ Редактировать</button>
+            <a class='nowrap' href='/download/{filename_q}' download><button type='button' class='btn-ok'>📥 Скачать CSV</button></a>
           </div>
         </div>
         """
 
     return f"""
     <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-      {base_css()}
-      <script>
-        async function delRef(nameQ){{
-          if(!confirm('Удалить справочник?')) return;
-          const r = await fetch('/delete_reference/'+nameQ, {{method:'POST'}});
-          if(r.ok) location.reload(); else alert('Не удалось удалить');
-        }}
-      </script>
+      {BASE_CSS}{BASE_JS}
     </head>
     <body>
       <div class='container'>
@@ -150,7 +149,7 @@ def render_index(last_error=None, last_result=None):
     </body></html>
     """
 
-# === Маршруты ===
+# === Роуты ===
 @app.get("/", response_class=HTMLResponse)
 async def index(_: HTTPBasicCredentials = Depends(auth)):
     return HTMLResponse(render_index())
@@ -161,7 +160,7 @@ async def upload_reference(ref_file: UploadFile = File(...), _: HTTPBasicCredent
     save_path = os.path.join(REF_DIR, save_name)
     with open(save_path, "wb") as buffer:
         shutil.copyfileobj(ref_file.file, buffer)
-    known_refs.add(save_name)  # кэш
+    known_refs.add(save_name)
     return HTMLResponse(render_index())
 
 @app.post("/delete_reference/{filename:path}")
@@ -170,8 +169,7 @@ async def delete_reference(filename: str, _: HTTPBasicCredentials = Depends(auth
     path = os.path.join(REF_DIR, name)
     if os.path.exists(path):
         os.remove(path)
-    if name in known_refs:
-        known_refs.remove(name)
+    known_refs.discard(name)
     return {"ok": True}
 
 @app.post("/process", response_class=HTMLResponse)
@@ -196,52 +194,57 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
         if not os.path.exists(file_path):
             return HTMLResponse("<h3>❌ Справочник не найден</h3><a href='/' >Назад</a>")
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-        # Таблица
         table_html = "<table id='csvTable'>" + \
             ("<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>") + \
             "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows()) + \
             "</table>"
-        # Страница
         return HTMLResponse(f"""
-        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-        {base_css()}
+        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{BASE_CSS}{BASE_JS}
         <script>
-          function csvEscape(v){{
-            v = (v??'').toString();
-            if (v.includes('"') || v.includes(',') || v.includes('\n')) v = '"' + v.replaceAll('"','""') + '"';
-            return v;
-          }}
-          function tableToCSV(id){{
-            const rows = Array.from(document.querySelectorAll('#'+id+' tr'));
-            return rows.map(r=>Array.from(r.children).map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\n');
-          }}
-          function searchTable(){{
-            const q = document.getElementById('search').value.toLowerCase();
+          const debouncedSearch = debounce(searchTable, 120);
+          function clearMarks(node){ node.querySelectorAll('mark').forEach(m=>m.replaceWith(m.textContent)); }
+          function searchTable(){
+            const inp = document.getElementById('search');
+            const q = (inp?.value||'').toLowerCase();
             const rows = document.querySelectorAll('#csvTable tr');
-            rows.forEach((row, i)=>{{
+            rows.forEach((row,i)=>{
               if(i===0) return; // header
               let show=false;
-              row.querySelectorAll('td').forEach(cell=>{{
+              row.querySelectorAll('td').forEach(cell=>{
+                // снять прошлую подсветку
+                clearMarks(cell);
                 const txt = cell.innerText;
                 const low = txt.toLowerCase();
-                if(q && low.includes(q)){{ show=true; cell.innerHTML = txt.replace(new RegExp(q,'ig'), m=>`<mark>${{m}}</mark>`); }}
-                else {{ cell.innerHTML = txt; }}
-              }});
+                if(q && low.includes(q)){
+                  show=true;
+                  // подсветка: безопасно через split/join
+                  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'ig');
+                  cell.innerHTML = txt.replace(re, m=>`<mark>${{m}}</mark>`);
+                }
+              });
               row.style.display = (!q || show) ? '' : 'none';
-            }});
-          }}
-          async function saveCSV(){{
+            });
+          }
+          async function saveCSV(){
+            // уберём <mark> перед сериализацией и возьмём только innerText
+            document.querySelectorAll('#csvTable td').forEach(td=>{ clearMarks(td); });
             const csv = tableToCSV('csvTable');
-            const res = await fetch('/save_reference/{quote(filename)}', {{ method:'POST', headers:{{'Content-Type':'text/csv'}}, body: csv }});
+            const res = await fetch('/save_reference/{quote(filename)}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
             if(res.ok) alert('Справочник сохранён'); else alert('Не удалось сохранить');
-          }}
+          }
+          window.addEventListener('DOMContentLoaded',()=>{
+            const btn = document.getElementById('btn-save');
+            if(btn) bindTap(btn, saveCSV);
+            const search = document.getElementById('search');
+            if(search){ search.addEventListener('input', debouncedSearch); search.addEventListener('keyup', debouncedSearch); }
+          });
         </script>
         </head>
         <body>
           <div class='bar container'>
-            <input id='search' placeholder='Поиск…' oninput='searchTable()' />
-            <button class='btn-ok' onclick='saveCSV()'>💾 Сохранить</button>
-            <a href='/'><button class='btn-secondary'>⬅ Назад</button></a>
+            <input id='search' placeholder='Поиск…' />
+            <button id='btn-save' type='button' class='btn-ok'>💾 Сохранить</button>
+            <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
             <h2>Редактирование: {html.escape(unquote(filename))}</h2>
@@ -272,34 +275,29 @@ async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
             "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows()) + \
             "</table>"
         return HTMLResponse(f"""
-        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-        {base_css()}
+        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{BASE_CSS}{BASE_JS}
         <script>
-          function csvEscape(v){{
-            v = (v??'').toString();
-            if (v.includes('"') || v.includes(',') || v.includes('\n')) v = '"' + v.replaceAll('"','""') + '"';
-            return v;
-          }}
-          function tableToCSV(id){{
-            const rows = Array.from(document.querySelectorAll('#'+id+' tr'));
-            return rows.map(r=>Array.from(r.children).map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\n');
-          }}
-          function downloadEdited(){{
+          function clearMarks(node){ node.querySelectorAll('mark').forEach(m=>m.replaceWith(m.textContent)); }
+          function downloadEdited(){
+            document.querySelectorAll('#routeTable td').forEach(td=>{ clearMarks(td); });
             const csv = tableToCSV('routeTable');
-            const blob = new Blob([csv], {{ type:'text/csv;charset=utf-8;' }});
+            const blob = new Blob(['\ufeff'+csv], { type:'text/csv;charset=utf-8;' }); // BOM для мобильного Excel
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.style.display='none';
-            a.href = url; a.download = '{html.escape(unquote(filename))}';
+            a.style.display='none'; a.href = url; a.download = '{html.escape(unquote(filename))}';
             document.body.appendChild(a); a.click();
-            setTimeout(()=>{{ URL.revokeObjectURL(url); a.remove(); }}, 500);
-          }}
+            setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+          }
+          window.addEventListener('DOMContentLoaded',()=>{
+            const btn = document.getElementById('btn-download');
+            if(btn) bindTap(btn, downloadEdited);
+          });
         </script>
         </head>
         <body>
           <div class='bar container'>
-            <button class='btn-ok' onclick='downloadEdited()'>💾 Сохранить и скачать</button>
-            <a href='/'><button class='btn-secondary'>⬅ Назад</button></a>
+            <button id='btn-download' type='button' class='btn-ok'>💾 Сохранить и скачать</button>
+            <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
             <h2>Редактирование маршрута: {html.escape(unquote(filename))}</h2>
