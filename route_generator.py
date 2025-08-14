@@ -16,8 +16,8 @@ def _extract_route_date_from_name(pdf_path: str) -> date:
 
 
 def _calc_route_num(route_date: date) -> int:
-    # количество будних дней от route_date до конца месяца + 1
-    last_day = (route_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    # колиство будних дней от route_date до конца месяца + 1
+    last_day = (roчеute_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     route_num = 0
     d = route_date
     while d < last_day:
@@ -39,8 +39,12 @@ def process_route(pdf_path: str, ref_path: str, output_dir: str) -> dict:
 
     # 📘 Загружаем справочник
     spravochnik = pd.read_csv(ref_path)
-    if "Address Line 1" not in spravochnik.columns:
-        raise ValueError("В справочнике нет колонки 'Address Line 1'. Ожидаются: Address Line 1, Address Line 2, City, Postal Code")
+    # Проверим обязательные колонки
+    required_cols = ["Address Line 1", "Address Line 2", "City", "Postal Code"]
+    missing = [c for c in required_cols if c not in spravochnik.columns]
+    if missing:
+        raise ValueError(f"В справочнике нет колонок: {missing}. Ожидаются: {required_cols}")
+
     # нормализованное имя для сопоставления
     spravochnik["norm_name"] = spravochnik["Address Line 1"].astype(str).str.lower().str.strip()
 
