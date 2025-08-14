@@ -17,7 +17,7 @@ def _extract_route_date_from_name(pdf_path: str) -> date:
 
 def _calc_route_num(route_date: date) -> int:
     # колиство будних дней от route_date до конца месяца + 1
-    last_day = (roчеute_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    last_day = (route_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     route_num = 0
     d = route_date
     while d < last_day:
