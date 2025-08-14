@@ -42,14 +42,7 @@ for d in (UPLOAD_DIR, OUTPUT_DIR, REF_DIR):
 # === Память справочников ===
 known_refs = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
 
-def list_references():
-    disk = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
-    global known_refs
-    known_refs |= disk
-    known_refs = set(r for r in known_refs if os.path.exists(os.path.join(REF_DIR, r)))
-    return sorted(known_refs)
-
-# === Общие стили/скрипты ===
+# === Общие стили/скрипты (НЕ f-строки!) ===
 BASE_CSS = """
 <style>
   :root { --btn:#0d6efd; --btn2:#6c757d; --ok:#28a745; }
@@ -76,16 +69,23 @@ BASE_CSS = """
 
 BASE_JS = """
 <script>
-  // Debounce для мобильного ввода
   function debounce(fn,ms){let t;return function(){clearTimeout(t);const a=arguments;const ctx=this;t=setTimeout(()=>fn.apply(ctx,a),ms)}}
-  function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\n'))v='"'+v.replaceAll('"','""')+'"';return v}
-  function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\n')}
-  function bindTap(el,handler){el.addEventListener('click',e=>{e.preventDefault();handler(e)},{passive:false});el.addEventListener('touchstart',e=>{e.preventDefault();handler(e)},{passive:false})}
+  function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
+  function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
+  function bindTap(id,handler){const el=document.getElementById(id);if(!el)return;el.addEventListener('click',e=>{e.preventDefault();handler(e)},{passive:false});el.addEventListener('touchstart',e=>{e.preventDefault();handler(e)},{passive:false})}
+  function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
 </script>
 """
 
-# === Рендер главной ===
+# === Утилиты ===
+def list_references():
+    disk = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
+    global known_refs
+    known_refs |= disk
+    known_refs = set(r for r in known_refs if os.path.exists(os.path.join(REF_DIR, r)))
+    return sorted(known_refs)
 
+# === Шаблоны ===
 def render_index(last_error=None, last_result=None):
     refs = list_references()
     refs_options = "".join([f"<option value='{html.escape(r)}'>{html.escape(r)}</option>" for r in refs])
@@ -104,22 +104,22 @@ def render_index(last_error=None, last_result=None):
         not_found_html = "<br>".join(html.escape(x) for x in last_result.get("not_found", [])) or "Все записи найдены."
         filename = os.path.basename(last_result["output_file"])
         filename_q = quote(filename)
-        result_block = f"""
+        result_block = """
         <div class='result'>
           <h2>Результат генерации</h2>
-          <p>Найдено: <b>{last_result['found_count']}</b> из <b>{last_result['total_count']}</b></p>
+          <p>Найдено: <b>{found}</b> из <b>{total}</b></p>
           <h3>Не найдено</h3>
-          <p>{not_found_html}</p>
+          <p>{not_found}</p>
           <div class='row'>
-            <button type='button' onclick=\"location.href='/edit_route/{filename_q}'\">✏ Редактировать</button>
-            <a class='nowrap' href='/download/{filename_q}' download><button type='button' class='btn-ok'>📥 Скачать CSV</button></a>
+            <button type='button' onclick="location.href='/edit_route/{file_q}'">✏ Редактировать</button>
+            <a class='nowrap' href="/download/{file_q}" download><button type='button' class='btn-ok'>📥 Скачать CSV</button></a>
           </div>
         </div>
-        """
+        """.format(found=last_result['found_count'], total=last_result['total_count'], not_found=not_found_html, file_q=filename_q)
 
-    return f"""
+    return """
     <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-      {BASE_CSS}{BASE_JS}
+      {css}{js}
     </head>
     <body>
       <div class='container'>
@@ -137,7 +137,7 @@ def render_index(last_error=None, last_result=None):
 
         <hr>
         <h2>Справочники</h2>
-        <ul>{refs_list_html or '<span class=muted>Пока нет загруженных CSV</span>'}</ul>
+        <ul>{refs_list}</ul>
 
         <h3>Добавить справочник</h3>
         <form action='/upload_reference' method='post' enctype='multipart/form-data'>
@@ -147,7 +147,7 @@ def render_index(last_error=None, last_result=None):
         </form>
       </div>
     </body></html>
-    """
+    """.format(css=BASE_CSS, js=BASE_JS, refs_options=refs_options, error_block=error_block, result_block=result_block or "", refs_list=refs_list_html or '<span class=muted>Пока нет загруженных CSV</span>')
 
 # === Роуты ===
 @app.get("/", response_class=HTMLResponse)
@@ -180,7 +180,7 @@ async def process(pdf_file: UploadFile = File(...), reference_file: str = Form(.
             shutil.copyfileobj(pdf_file.file, buffer)
         ref_path = os.path.join(REF_DIR, reference_file)
         if not os.path.exists(ref_path):
-            return HTMLResponse(render_index(last_error=f"Справочник не найден: {ref_path}"))
+            return HTMLResponse(render_index(last_error="Справочник не найден: " + ref_path))
         result = process_route(pdf_path, ref_path, OUTPUT_DIR)
         return HTMLResponse(render_index(last_result=result))
     except Exception as e:
@@ -194,64 +194,61 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
         if not os.path.exists(file_path):
             return HTMLResponse("<h3>❌ Справочник не найден</h3><a href='/' >Назад</a>")
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-        table_html = "<table id='csvTable'>" + \
-            ("<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>") + \
-            "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows()) + \
-            "</table>"
-        return HTMLResponse(f"""
-        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{BASE_CSS}{BASE_JS}
+        header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
+        rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
+        table_html = "<table id='csvTable'>" + header + rows + "</table>"
+        page = """
+        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+        {css}{js}
         <script>
-          const debouncedSearch = debounce(searchTable, 120);
-          function clearMarks(node){ node.querySelectorAll('mark').forEach(m=>m.replaceWith(m.textContent)); }
+          function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
+          function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
+          function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
+          function escapeRegex(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}
           function searchTable(){
-            const inp = document.getElementById('search');
-            const q = (inp?.value||'').toLowerCase();
+            const q = document.getElementById('search').value.toLowerCase();
             const rows = document.querySelectorAll('#csvTable tr');
-            rows.forEach((row,i)=>{
-              if(i===0) return; // header
+            rows.forEach((row, i)=>{
+              if(i===0) return;
               let show=false;
               row.querySelectorAll('td').forEach(cell=>{
-                // снять прошлую подсветку
                 clearMarks(cell);
-                const txt = cell.innerText;
-                const low = txt.toLowerCase();
+                const txt=cell.innerText; const low=txt.toLowerCase();
                 if(q && low.includes(q)){
-                  show=true;
-                  // подсветка: безопасно через split/join
-                  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'ig');
-                  cell.innerHTML = txt.replace(re, m=>`<mark>${{m}}</mark>`);
+                  show=true; const re=new RegExp(escapeRegex(q),'ig');
+                  cell.innerHTML = txt.replace(re, function(m){ return '<mark>'+m+'</mark>'; });
                 }
               });
               row.style.display = (!q || show) ? '' : 'none';
             });
           }
           async function saveCSV(){
-            // уберём <mark> перед сериализацией и возьмём только innerText
             document.querySelectorAll('#csvTable td').forEach(td=>{ clearMarks(td); });
             const csv = tableToCSV('csvTable');
-            const res = await fetch('/save_reference/{quote(filename)}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
+            const res = await fetch('/save_reference/{name_q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
             if(res.ok) alert('Справочник сохранён'); else alert('Не удалось сохранить');
           }
-          window.addEventListener('DOMContentLoaded',()=>{
-            const btn = document.getElementById('btn-save');
-            if(btn) bindTap(btn, saveCSV);
-            const search = document.getElementById('search');
-            if(search){ search.addEventListener('input', debouncedSearch); search.addEventListener('keyup', debouncedSearch); }
+          document.addEventListener('DOMContentLoaded', function(){
+            const deb = debounce(searchTable, 120);
+            const inp = document.getElementById('search');
+            inp.addEventListener('input', deb);
+            inp.addEventListener('keyup', deb);
           });
         </script>
         </head>
         <body>
           <div class='bar container'>
             <input id='search' placeholder='Поиск…' />
-            <button id='btn-save' type='button' class='btn-ok'>💾 Сохранить</button>
+            <button id='btn-save' type='button' class='btn-ok' onclick='saveCSV()'>💾 Сохранить</button>
             <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
-            <h2>Редактирование: {html.escape(unquote(filename))}</h2>
-            {table_html}
+            <h2>Редактирование: {name_h}</h2>
+            {table}
           </div>
         </body></html>
-        """)
+        """.format(css=BASE_CSS, js=BASE_JS, name_q=quote(filename), name_h=html.escape(unquote(filename)), table=table_html)
+        return HTMLResponse(page)
     except Exception as e:
         return HTMLResponse(f"<pre>Ошибка: {html.escape(str(e))}</pre>")
 
@@ -270,41 +267,40 @@ async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
         if not os.path.exists(file_path):
             return HTMLResponse("<h3>❌ Файл маршрута не найден</h3><a href='/' >Назад</a>")
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-        table_html = "<table id='routeTable'>" + \
-            ("<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>") + \
-            "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows()) + \
-            "</table>"
-        return HTMLResponse(f"""
-        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{BASE_CSS}{BASE_JS}
+        header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
+        rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
+        table_html = "<table id='routeTable'>" + header + rows + "</table>"
+        page = """
+        <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+        {css}{js}
         <script>
-          function clearMarks(node){ node.querySelectorAll('mark').forEach(m=>m.replaceWith(m.textContent)); }
+          function csvEscape(v){v=(v??'').toString();if(v.includes('"')||v.includes(',')||v.includes('\\n'))v='"'+v.replaceAll('"','""')+'"';return v}
+          function tableToCSV(id){const rows=[...document.querySelectorAll('#'+id+' tr')];return rows.map(r=>[...r.children].map(td=>csvEscape(td.innerText))).map(r=>r.join(',')).join('\\n')}
+          function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
           function downloadEdited(){
             document.querySelectorAll('#routeTable td').forEach(td=>{ clearMarks(td); });
             const csv = tableToCSV('routeTable');
-            const blob = new Blob(['\ufeff'+csv], { type:'text/csv;charset=utf-8;' }); // BOM для мобильного Excel
+            const blob = new Blob(['\\ufeff'+csv], { type:'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.style.display='none'; a.href = url; a.download = '{html.escape(unquote(filename))}';
+            a.style.display='none'; a.href=url; a.download='{name_h}';
             document.body.appendChild(a); a.click();
-            setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+            setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 500);
           }
-          window.addEventListener('DOMContentLoaded',()=>{
-            const btn = document.getElementById('btn-download');
-            if(btn) bindTap(btn, downloadEdited);
-          });
         </script>
         </head>
         <body>
           <div class='bar container'>
-            <button id='btn-download' type='button' class='btn-ok'>💾 Сохранить и скачать</button>
+            <button id='btn-download' type='button' class='btn-ok' onclick='downloadEdited()'>💾 Сохранить и скачать</button>
             <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
           </div>
           <div class='container'>
-            <h2>Редактирование маршрута: {html.escape(unquote(filename))}</h2>
-            {table_html}
+            <h2>Редактирование маршрута: {name_h}</h2>
+            {table}
           </div>
         </body></html>
-        """)
+        """.format(css=BASE_CSS, js=BASE_JS, name_h=html.escape(unquote(filename)), table=table_html)
+        return HTMLResponse(page)
     except Exception as e:
         return HTMLResponse(f"<pre>Ошибка: {html.escape(str(e))}</pre>")
 
