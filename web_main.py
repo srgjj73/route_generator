@@ -208,8 +208,14 @@ async def process(pdf_file: UploadFile = File(...), reference_file: str = Form(.
 @app.get("/view_reference/{filename:path}", response_class=HTMLResponse)
 async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     """
-    Редактор справочника: добавление/удаление строк, поиск с подсветкой, сохранение CSV (с заголовком).
-    Первая колонка — чекбоксы (НЕ попадает в CSV).
+    Редактор справочника:
+    - Добавление/удаление строк;
+    - Поиск с подсветкой;
+    - Сохранение CSV (с заголовком).
+    Особенности:
+    - новые строки добавляются ВВЕРХ;
+    - NaN не выводятся (пусто);
+    - значения вида 123.0 показываем как 123 (убираем ".0" у индексов и id).
     """
     try:
         file_path = os.path.join(REF_DIR, unquote(filename))
@@ -218,11 +224,29 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
 
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
 
-        # Строим THEAD + TBODY. Первая колонка — чекбоксы.
+        def _fmt(v):
+            import math
+            # NaN -> ''
+            if v is None: return ""
+            try:
+                # pandas NaN/NaT
+                if pd.isna(v): return ""
+            except Exception:
+                pass
+            # чистим .0 у целых float
+            if isinstance(v, float):
+                if v.is_integer():
+                    return str(int(v))
+            # строковый вариант: '123.0' -> '123'
+            s = str(v)
+            if s.endswith('.0') and s[:-2].isdigit():
+                return s[:-2]
+            return s
+
         thead = "<thead><tr><th>✓</th>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr></thead>"
         body_rows = []
         for _, row in df.iterrows():
-            tds = "".join(f"<td class='data' contenteditable='true'>{html.escape(str(v))}</td>" for v in row)
+            tds = "".join(f"<td class='data' contenteditable='true'>{html.escape(_fmt(v))}</td>" for v in row)
             body_rows.append("<tr><td class='sel'><input type='checkbox'></td>" + tds + "</tr>")
         tbody = "<tbody>" + "".join(body_rows) + "</tbody>"
         table_html = "<table id='csvTable'>" + thead + tbody + "</table>"
@@ -236,16 +260,11 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
           #csvTable td.sel{ text-align:center; }
         </style>
         <script>
-          // ——— Глобальные функции в window + навешивание событий после DOMContentLoaded ———
           (function(){
-            console.log('[editor] script loaded');
+            function headerCells(){ return Array.from(document.querySelectorAll('#csvTable thead th')).slice(1); }
+            function dataRows(){ return Array.from(document.querySelectorAll('#csvTable tbody tr')); }
 
-            function headerCells(){
-              return Array.from(document.querySelectorAll('#csvTable thead th')).slice(1);
-            }
-            function dataRows(){
-              return Array.from(document.querySelectorAll('#csvTable tbody tr'));
-            }
+            // ➕ добавляем строку ВВЕРХ (в начало tbody)
             window.addRow = function(){
               try{
                 const cols = headerCells().length;
@@ -260,10 +279,12 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                   td.innerText = '';
                   tr.appendChild(td);
                 }
-                document.querySelector('#csvTable tbody').appendChild(tr);
-                console.log('[editor] row added');
+                const tbody = document.querySelector('#csvTable tbody');
+                const first = tbody.firstElementChild;
+                tbody.insertBefore(tr, first); // вставляем В ПЕРВУЮ позицию
               }catch(e){ console.error('addRow error', e); alert('Не удалось добавить строку'); }
             };
+
             window.deleteSelected = function(){
               try{
                 let removed = 0;
@@ -272,9 +293,9 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                   if(cb && cb.checked){ tr.remove(); removed++; }
                 });
                 if(!removed) alert('Нет выбранных строк');
-                console.log('[editor] rows removed:', removed);
               }catch(e){ console.error('deleteSelected error', e); alert('Не удалось удалить'); }
             };
+
             window.searchTable = function(){
               try{
                 const inp = document.getElementById('search');
@@ -293,6 +314,7 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                 });
               }catch(e){ console.error('searchTable error', e); }
             };
+
             window.saveCSV = async function(){
               try{
                 document.querySelectorAll('#csvTable td.data').forEach(td=>{ clearMarks(td); });
@@ -315,12 +337,10 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                 const csv = [head, ...body].join('\\n');
                 const res = await fetch('/save_reference/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
                 if(res.ok){ alert('Справочник сохранён'); location.reload(); } else alert('Не удалось сохранить');
-                console.log('[editor] save done, status:', res.status);
               }catch(e){ console.error('saveCSV error', e); alert('Ошибка сохранения'); }
             };
 
             document.addEventListener('DOMContentLoaded', function(){
-              // биндим кнопки по id
               var btnAdd = document.getElementById('btn-add');
               var btnDel = document.getElementById('btn-del');
               var btnSave = document.getElementById('btn-save');
@@ -328,13 +348,11 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
               if(btnDel) btnDel.addEventListener('click', function(e){ e.preventDefault(); window.deleteSelected(); }, {passive:false});
               if(btnSave) btnSave.addEventListener('click', function(e){ e.preventDefault(); window.saveCSV(); }, {passive:false});
 
-              // поиск — несколько событий
               const inp = document.getElementById('search');
               if(inp){
                 const deb = debounce(window.searchTable, 120);
                 ['input','keyup','change','paste'].forEach(ev=> inp.addEventListener(ev, deb));
               }
-              console.log('[editor] bindings ready');
             });
           })();
         </script>
