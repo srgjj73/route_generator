@@ -421,7 +421,12 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
 
                 const csv = [head, ...body].join('\\n');
                 const res = await fetch('/save_reference/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
-                if(res.ok){ alert('Справочник сохранён'); location.reload(); } else alert('Не удалось сохранить');
+                if(!res.ok){ alert('Не удалось сохранить'); return; }
+                const j = await res.json().catch(()=>({status:'saved'}));
+                if(j.status==='nochange'){ alert('Изменений нет'); }
+                else if(j.status==='saved'){ alert('Сохранено (GitHub)'); }
+                else { alert('Ошибка GitHub при сохранении'); }
+                location.reload();
               }catch(e){ console.error('saveCSV error', e); alert('Ошибка сохранения'); }
             };
 
@@ -473,9 +478,26 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
 async def save_reference(filename: str, request: Request, _: HTTPBasicCredentials = Depends(auth)):
     file_path = os.path.join(REF_DIR, unquote(filename))
     body = await request.body()
-    with open(file_path, "wb") as f:
-        f.write(body)
-    return {"status": "ok"}
+    text = body.decode('utf-8', errors='replace')
+
+    # 1) локально сохраняем
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(text)
+
+    # 2) если настроен GitHub — сравним и, при необходимости, запушим
+    try:
+        rel_path = f"{GITHUB_DIR}/" + os.path.basename(file_path)
+        existing = gh_download_text(rel_path)
+        if existing is not None and existing == text:
+            logger.info("GitHub upsert %s -> nochange", rel_path)
+            return {"status": "nochange"}
+
+        ok = gh_upsert_text(rel_path, text, f"save: {os.path.basename(file_path)}")
+        return {"status": "saved" if ok else "gh_error"}
+    except Exception as e:
+        logger.exception("GitHub upsert on save failed: %s", e)
+        return {"status": "gh_error"}
 
 # === Редактор маршрута
 @app.get("/edit_route/{filename:path}", response_class=HTMLResponse)
