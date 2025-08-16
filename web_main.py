@@ -14,6 +14,9 @@ from route_generator import process_route
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
 
+# -- PDF in-memory cache until process restarts
+PDF_CACHE = {}  # key: filename, value: bytes
+
 # === Basic Auth ===
 security = HTTPBasic()
 AUTH_USER = os.getenv("BASIC_AUTH_USER", "")
@@ -204,60 +207,147 @@ async def process(pdf_file: UploadFile = File(...), reference_file: str = Form(.
 # === Редактор справочника
 @app.get("/view_reference/{filename:path}", response_class=HTMLResponse)
 async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth)):
+    """
+    Редактор справочника: добавление/удаление строк, поиск с подсветкой, сохранение CSV (с заголовком).
+    Первая колонка — чекбоксы (НЕ попадает в CSV).
+    """
     try:
         file_path = os.path.join(REF_DIR, unquote(filename))
         if not os.path.exists(file_path):
             return HTMLResponse("<h3>❌ Справочник не найден</h3><a href='/' >Назад</a>")
+
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-        header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
-        rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
-        table_html = "<table id='csvTable'>" + header + rows + "</table>"
+
+        # Строим THEAD + TBODY. Первая колонка — чекбоксы.
+        thead = "<thead><tr><th>✓</th>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr></thead>"
+        body_rows = []
+        for _, row in df.iterrows():
+            tds = "".join(f"<td class='data' contenteditable='true'>{html.escape(str(v))}</td>" for v in row)
+            body_rows.append("<tr><td class='sel'><input type='checkbox'></td>" + tds + "</tr>")
+        tbody = "<tbody>" + "".join(body_rows) + "</tbody>"
+        table_html = "<table id='csvTable'>" + thead + tbody + "</table>"
 
         page_tpl = """
         <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
         {CSS}{JS}
+        <style>
+          #csvTable th:first-child, #csvTable td.sel{position:sticky; left:0; background:#fff; z-index:1;}
+          #csvTable th:first-child{width:40px; text-align:center;}
+          #csvTable td.sel{ text-align:center; }
+        </style>
         <script>
-          function searchTable(){
-            const q = document.getElementById('search').value.toLowerCase();
-            const rows = document.querySelectorAll('#csvTable tr');
-            rows.forEach((row, i)=>{
-              if(i===0) return;
-              let show=false;
-              row.querySelectorAll('td').forEach(cell=>{
-                clearMarks(cell);
-                const txt=cell.innerText; const low=txt.toLowerCase();
-                if(q && low.includes(q)){
-                  show=true; const re=new RegExp(escapeRegex(q),'ig');
-                  cell.innerHTML = txt.replace(re, function(m){ return '<mark>'+m+'</mark>'; });
+          // ——— Глобальные функции в window + навешивание событий после DOMContentLoaded ———
+          (function(){
+            console.log('[editor] script loaded');
+
+            function headerCells(){
+              return Array.from(document.querySelectorAll('#csvTable thead th')).slice(1);
+            }
+            function dataRows(){
+              return Array.from(document.querySelectorAll('#csvTable tbody tr'));
+            }
+            window.addRow = function(){
+              try{
+                const cols = headerCells().length;
+                const tr = document.createElement('tr');
+                const sel = document.createElement('td'); sel.className='sel';
+                sel.innerHTML = "<input type='checkbox'>";
+                tr.appendChild(sel);
+                for(let i=0;i<cols;i++){
+                  const td = document.createElement('td');
+                  td.className='data';
+                  td.contentEditable = 'true';
+                  td.innerText = '';
+                  tr.appendChild(td);
                 }
-              });
-              row.style.display = (!q || show) ? '' : 'none';
+                document.querySelector('#csvTable tbody').appendChild(tr);
+                console.log('[editor] row added');
+              }catch(e){ console.error('addRow error', e); alert('Не удалось добавить строку'); }
+            };
+            window.deleteSelected = function(){
+              try{
+                let removed = 0;
+                dataRows().forEach((tr)=>{
+                  const cb = tr.querySelector('td.sel input[type=checkbox]');
+                  if(cb && cb.checked){ tr.remove(); removed++; }
+                });
+                if(!removed) alert('Нет выбранных строк');
+                console.log('[editor] rows removed:', removed);
+              }catch(e){ console.error('deleteSelected error', e); alert('Не удалось удалить'); }
+            };
+            window.searchTable = function(){
+              try{
+                const inp = document.getElementById('search');
+                const q = (inp && inp.value ? inp.value : '').toLowerCase();
+                dataRows().forEach((row)=>{
+                  let show=false;
+                  row.querySelectorAll('td.data').forEach(cell=>{
+                    clearMarks(cell);
+                    const txt=cell.innerText; const low=txt.toLowerCase();
+                    if(q && low.includes(q)){
+                      show=true; const re=new RegExp(escapeRegex(q),'ig');
+                      cell.innerHTML = txt.replace(re, function(m){ return '<mark>'+m+'</mark>'; });
+                    }
+                  });
+                  row.style.display = (!q || show) ? '' : 'none';
+                });
+              }catch(e){ console.error('searchTable error', e); }
+            };
+            window.saveCSV = async function(){
+              try{
+                document.querySelectorAll('#csvTable td.data').forEach(td=>{ clearMarks(td); });
+
+                const head = headerCells().map(th=>{
+                  let v = th.innerText || '';
+                  if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                  return v;
+                }).join(',');
+
+                const body = Array.from(document.querySelectorAll('#csvTable tbody tr')).map(tr=>{
+                  const cells = Array.from(tr.querySelectorAll('td.data')).map(td=>{
+                    let v = td.innerText || '';
+                    if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                    return v;
+                  }).join(',');
+                  return cells;
+                });
+
+                const csv = [head, ...body].join('\\n');
+                const res = await fetch('/save_reference/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
+                if(res.ok){ alert('Справочник сохранён'); location.reload(); } else alert('Не удалось сохранить');
+                console.log('[editor] save done, status:', res.status);
+              }catch(e){ console.error('saveCSV error', e); alert('Ошибка сохранения'); }
+            };
+
+            document.addEventListener('DOMContentLoaded', function(){
+              // биндим кнопки по id
+              var btnAdd = document.getElementById('btn-add');
+              var btnDel = document.getElementById('btn-del');
+              var btnSave = document.getElementById('btn-save');
+              if(btnAdd) btnAdd.addEventListener('click', function(e){ e.preventDefault(); window.addRow(); }, {passive:false});
+              if(btnDel) btnDel.addEventListener('click', function(e){ e.preventDefault(); window.deleteSelected(); }, {passive:false});
+              if(btnSave) btnSave.addEventListener('click', function(e){ e.preventDefault(); window.saveCSV(); }, {passive:false});
+
+              // поиск — несколько событий
+              const inp = document.getElementById('search');
+              if(inp){
+                const deb = debounce(window.searchTable, 120);
+                ['input','keyup','change','paste'].forEach(ev=> inp.addEventListener(ev, deb));
+              }
+              console.log('[editor] bindings ready');
             });
-          }
-          async function saveCSV(){
-            document.querySelectorAll('#csvTable td').forEach(td=>{ clearMarks(td); });
-            const rows = Array.from(document.querySelectorAll('#csvTable tr'));
-            const csv = rows.map(r=>Array.from(r.children).map(td=>{
-              let v = (td.innerText||'');
-              if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
-              return v;
-            }).join(',')).join('\\n');
-            const res = await fetch('/save_reference/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
-            if(res.ok) alert('Справочник сохранён'); else alert('Не удалось сохранить');
-          }
-          document.addEventListener('DOMContentLoaded', function(){
-            const deb = debounce(searchTable, 120);
-            const inp = document.getElementById('search');
-            inp.addEventListener('input', deb);
-            inp.addEventListener('keyup', deb);
-          });
+          })();
         </script>
         </head>
         <body>
           <div class='bar container'>
             <input id='search' placeholder='Поиск…' />
-            <button id='btn-save' type='button' class='btn-ok' onclick='saveCSV()'>💾 Сохранить</button>
-            <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
+            <div class='row' style='gap:8px;'>
+              <button id='btn-add' type='button' class='btn-secondary'>➕ Добавить строку</button>
+              <button id='btn-del' type='button' class='btn-secondary'>🗑 Удалить выбранные</button>
+              <button id='btn-save' type='button' class='btn-ok'>💾 Сохранить</button>
+              <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
+            </div>
           </div>
           <div class='container'>
             <h2>Редактирование: {NAME_H}</h2>
