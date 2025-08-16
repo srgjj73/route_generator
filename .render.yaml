@@ -1,16 +1,15 @@
 services:
   - type: web
-    name: delivery-route-app
-    runtime: python
+    name: route-generator
+    env: python
     plan: free
-    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:$PORT web_main:app
-    autoDeploy: true
+    startCommand: gunicorn web_main:app -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:$PORT --timeout 180 --graceful-timeout 60 --keep-alive 30 --access-logfile - --error-logfile -
     envVars:
       - key: BASE_DIR
         value: /data
-    disk:
-      name: data
-      mountPath: /data
-      sizeGB: 2
+    disks:
+      - name: data
+        mountPath: /data
+        sizeGB: 1
+    healthCheckPath: /healthz
