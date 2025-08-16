@@ -9,9 +9,15 @@ import html
 import traceback
 import logging
 from urllib.parse import quote, unquote
+import base64, json, requests
 from route_generator import process_route
 
 app = FastAPI()
+
+@app.on_event("startup")
+async def _startup_sync():
+    sync_refs_from_github()
+
 logger = logging.getLogger("uvicorn.error")
 
 # -- PDF in-memory cache until process restarts
@@ -44,6 +50,13 @@ for d in (UPLOAD_DIR, OUTPUT_DIR, REF_DIR):
 
 # === Память справочников ===
 known_refs = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
+
+# === GitHub persistence (optional) ===
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.getenv("GITHUB_REPO", "")      # вида 'owner/name' (рекомендую отдельный репозиторий)
+GITHUB_BRANCH= os.getenv("GITHUB_BRANCH", "main")
+GITHUB_DIR   = os.getenv("GITHUB_DIR", "refs")   # папка в репозитории для CSV
+
 
 # === Общие стили/скрипты (без f-строк и format) ===
 BASE_CSS = """
@@ -81,6 +94,72 @@ BASE_JS = """
 """
 
 # === Утилиты ===
+
+def gh_headers():
+    if not GITHUB_TOKEN: return {}
+    return {"Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"}
+
+def gh_contents_url(path):
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+
+def gh_get_sha(path):
+    if not (GITHUB_TOKEN and GITHUB_REPO): return None
+    r = requests.get(gh_contents_url(path), params={"ref": GITHUB_BRANCH}, headers=gh_headers(), timeout=20)
+    if r.status_code==200:
+        return r.json().get("sha")
+    return None
+
+def gh_upsert_text(path, text, message):
+    if not (GITHUB_TOKEN and GITHUB_REPO): return False
+    sha = gh_get_sha(path)
+    payload = {
+        "message": message,
+        "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BRANCH
+    }
+    if sha: payload["sha"] = sha
+    r = requests.put(gh_contents_url(path), headers=gh_headers(), json=payload, timeout=30)
+    logger.info("GitHub upsert %s -> %s", path, r.status_code)
+    return 200 <= r.status_code < 300
+
+def gh_list_dir(path):
+    if not (GITHUB_TOKEN and GITHUB_REPO): return []
+    r = requests.get(gh_contents_url(path), params={"ref": GITHUB_BRANCH}, headers=gh_headers(), timeout=20)
+    if r.status_code==200 and isinstance(r.json(), list):
+        return [it for it in r.json() if it.get("type")=="file"]
+    return []
+
+def gh_download_text(path):
+    # используем contents API, чтобы не возиться с raw
+    r = requests.get(gh_contents_url(path), params={"ref": GITHUB_BRANCH}, headers=gh_headers(), timeout=20)
+    if r.status_code==200 and r.json().get("encoding")=="base64":
+        return base64.b64decode(r.json()["content"]).decode("utf-8", errors="replace")
+    return None
+
+def sync_refs_from_github():
+    if not (GITHUB_TOKEN and GITHUB_REPO): 
+        logger.info("GitHub sync skipped (no token/repo)")
+        return
+    try:
+        os.makedirs(REF_DIR, exist_ok=True)
+        items = gh_list_dir(GITHUB_DIR)
+        cnt=0
+        for it in items:
+            name = it.get("name","")
+            if not name.lower().endswith(".csv"): continue
+            rel = f"{GITHUB_DIR}/{name}"
+            txt = gh_download_text(rel)
+            if txt is None: continue
+            with open(os.path.join(REF_DIR, name), "w", encoding="utf-8", newline="\n") as f:
+                f.write(txt)
+            cnt+=1
+        logger.info("GitHub sync: %d files", cnt)
+    except Exception as e:
+        logger.exception("GitHub sync failed: %s", e)
+
+
 def list_references():
     disk = set(f for f in os.listdir(REF_DIR) if f.lower().endswith('.csv'))
     global known_refs
@@ -178,6 +257,12 @@ async def upload_reference(ref_file: UploadFile = File(...), _: HTTPBasicCredent
     with open(save_path, "wb") as buffer:
         shutil.copyfileobj(ref_file.file, buffer)
     known_refs.add(save_name)
+    # push to GitHub if configured
+    try:
+        with open(save_path,'r',encoding='utf-8') as rf:
+            gh_upsert_text(f"{GITHUB_DIR}/"+save_name, rf.read(), f"upload: {save_name}")
+    except Exception as e:
+        logger.exception("GitHub upsert on upload failed: %s", e)
     return HTMLResponse(render_index())
 
 @app.post("/delete_reference/{filename:path}")
