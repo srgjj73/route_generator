@@ -208,6 +208,22 @@ def render_index(last_error=None, last_result=None):
     page_tpl = """
     <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
       {CSS}{JS}
+        <script>
+        document.addEventListener('DOMContentLoaded', function(){
+          var sel = document.getElementById('ref-select');
+          if(!sel) return;
+          try{
+            var KEY='lastRef';
+            var saved = localStorage.getItem(KEY);
+            if(saved){
+              for(var i=0;i<sel.options.length;i++){
+                if(sel.options[i].value===saved){ sel.value = saved; break; }
+              }
+            }
+            sel.addEventListener('change', function(){ localStorage.setItem(KEY, sel.value); });
+          }catch(e){}
+        });
+        </script>
     </head>
     <body>
       <div class='container'>
@@ -216,7 +232,7 @@ def render_index(last_error=None, last_result=None):
           <label>Транспортный лист (PDF):</label>
           <input type='file' name='pdf_file' accept='.pdf' required>
           <label>Выберите справочник:</label>
-          <select name='reference_file' required>{REFS_OPTIONS}</select>
+          <select id='ref-select' name='reference_file' required>{REFS_OPTIONS}</select>
           <button type='submit'>Сгенерировать маршрут</button>
         </form>
 
