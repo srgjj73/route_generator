@@ -190,6 +190,7 @@ def render_index(last_error=None, last_result=None):
         result_block_tpl = """
         <div class='result'>
           <h2>Результат генерации</h2>
+          <p><b>Файл:</b> {FILENAME}</p>
           <p>Найдено: <b>{FOUND}</b> из <b>{TOTAL}</b></p>
           <h3>Не найдено</h3>
           <p>{NOT_FOUND}</p>
@@ -203,7 +204,8 @@ def render_index(last_error=None, last_result=None):
                         .replace("{FOUND}", str(last_result['found_count']))
                         .replace("{TOTAL}", str(last_result['total_count']))
                         .replace("{NOT_FOUND}", not_found_html)
-                        .replace("{FILE_Q}", filename_q))
+                        .replace("{FILE_Q}", filename_q)
+                        .replace("{FILENAME}", html.escape(filename)))
 
     page_tpl = """
     <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -532,52 +534,222 @@ async def save_reference(filename: str, request: Request, _: HTTPBasicCredential
         return {"status": "gh_error"}
 
 # === Редактор маршрута
+
 @app.get("/edit_route/{filename:path}", response_class=HTMLResponse)
 async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
+    """
+    Редактор маршрута:
+    - мобильный тулбар (4 кнопки в ряд);
+    - поиск с подсветкой + очистка;
+    - вставка строк сверху;
+    - без NaN; убираем .0 у целых;
+    - Сохранить -> пишет файл в OUTPUT_DIR через /save_route/{filename};
+    - Скачать -> скачивание текущего содержимого таблицы;
+    - Назад -> history.back() (возвращает на страницу с результатом генерации в исходном состоянии).
+    """
     try:
         file_path = os.path.join(OUTPUT_DIR, unquote(filename))
         if not os.path.exists(file_path):
             return HTMLResponse("<h3>❌ Файл маршрута не найден</h3><a href='/' >Назад</a>")
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-        header = "<tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr>"
-        rows = "".join("<tr>" + "".join(f"<td contenteditable='true'>{html.escape(str(v))}</td>" for v in row) + "</tr>" for _, row in df.iterrows())
-        table_html = "<table id='routeTable'>" + header + rows + "</table>"
+
+        def _fmt(v):
+            if v is None: return ""
+            try:
+                if pd.isna(v): return ""
+            except Exception:
+                pass
+            # 123.0 -> 123
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            s = str(v)
+            if s.endswith('.0') and s[:-2].isdigit():
+                return s[:-2]
+            return s
+
+        header = "<thead><tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns) + "</tr></thead>"
+        rows = []
+        for _, row in df.iterrows():
+            rows.append("<tr>" + "".join(f"<td class='data' contenteditable='true'>{html.escape(_fmt(v))}</td>" for v in row) + "</tr>")
+        tbody = "<tbody>" + "".join(rows) + "</tbody>"
+        table_html = "<table id='routeTable'>" + header + tbody + "</table>"
 
         page_tpl = """
         <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
         {CSS}{JS}
+        <style>
+          .toolbar{position:sticky;top:0;background:#fff;padding:12px 16px;z-index:5;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+          .actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+          .actions button{width:100%}
+          .searchRow{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:10px}
+        </style>
         <script>
-          function downloadEdited(){
-            document.querySelectorAll('#routeTable td').forEach(td=>{ clearMarks(td); });
-            const rows = Array.from(document.querySelectorAll('#routeTable tr'));
-            const csv = rows.map(r=>Array.from(r.children).map(td=>{
-              let v = (td.innerText||'');
-              if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
-              return v;
-            }).join(',')).join('\\n');
-            const blob = new Blob(['\\ufeff'+csv], { type:'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display='none'; a.href=url; a.download='{NAME_H}';
-            document.body.appendChild(a); a.click();
-            setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 500);
-          }
+          (function(){
+            function colCount(){ return document.querySelectorAll('#routeTable thead th').length; }
+            function clearMarks(node){ node.querySelectorAll('mark').forEach(function(m){ m.replaceWith(m.textContent); }); }
+            function escapeRegex(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}
+
+            // Добавить строку вверх
+            window.addRow = function(){
+              try{
+                const cols = colCount();
+                const tr = document.createElement('tr');
+                for(let i=0;i<cols;i++){
+                  const td = document.createElement('td');
+                  td.className='data';
+                  td.contentEditable='true';
+                  td.innerText='';
+                  tr.appendChild(td);
+                }
+                const tbody=document.querySelector('#routeTable tbody');
+                tbody.insertBefore(tr, tbody.firstElementChild);
+              }catch(e){ console.error('addRow',e); alert('Не удалось добавить строку'); }
+            };
+
+            // Удалить выбранные строки (по чекбоксам нет — поэтому удалим выделенные ячейки строк? Проще: кнопка удаляет выделенные пользователем строки по selection API неустойчива.
+            // Реализуем диалог: удалить последнюю добавленную или все пустые. Для простоты — удалим строки, где все ячейки пустые.)
+            window.deleteSelected = function(){
+              try{
+                const rows = Array.from(document.querySelectorAll('#routeTable tbody tr'));
+                let removed=0;
+                rows.forEach(tr=>{
+                  const cells=[...tr.querySelectorAll('td.data')];
+                  if(cells.every(td=>(td.innerText||'').trim()==='')){ tr.remove(); removed++; }
+                });
+                if(!removed) alert('Пустых строк нет. Очистите содержимое нужной строки и нажмите удалить.');
+              }catch(e){ console.error('deleteSelected',e); alert('Не удалось удалить'); }
+            };
+
+            // Поиск
+            window.searchTable = function(){
+              try{
+                const inp = document.getElementById('search');
+                const q = (inp && inp.value ? inp.value : '').toLowerCase();
+                const rows = Array.from(document.querySelectorAll('#routeTable tbody tr'));
+                rows.forEach(row=>{
+                  let show=false;
+                  row.querySelectorAll('td.data').forEach(cell=>{
+                    clearMarks(cell);
+                    const txt=cell.innerText; const low=txt.toLowerCase();
+                    if(q && low.includes(q)){
+                      show=true; const re=new RegExp(escapeRegex(q),'ig');
+                      cell.innerHTML = txt.replace(re, function(m){ return '<mark>'+m+'</mark>'; });
+                    }
+                  });
+                  row.style.display = (!q || show) ? '' : 'none';
+                });
+              }catch(e){ console.error('searchTable',e); }
+            };
+            window.clearSearch = function(){
+              const inp = document.getElementById('search');
+              if(!inp) return;
+              inp.value=''; window.searchTable(); inp.focus();
+            };
+
+            // Сохранить на сервер
+            window.saveRoute = async function(){
+              try{
+                document.querySelectorAll('#routeTable td.data').forEach(td=>{ clearMarks(td); });
+                const head = Array.from(document.querySelectorAll('#routeTable thead th')).map(th=>{
+                  let v = th.innerText || '';
+                  if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                  return v;
+                }).join(',');
+                const body = Array.from(document.querySelectorAll('#routeTable tbody tr')).map(tr=>{
+                  const cells = Array.from(tr.querySelectorAll('td.data')).map(td=>{
+                    let v = td.innerText || '';
+                    if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                    return v;
+                  }).join(',');
+                  return cells;
+                });
+                const csv = [head, ...body].join('\\n');
+                const res = await fetch('/save_route/{NAME_Q}', { method:'POST', headers:{'Content-Type':'text/csv;charset=utf-8'}, body: csv });
+                if(!res.ok){ alert('Не удалось сохранить'); return; }
+                const j = await res.json().catch(()=>({status:'ok'}));
+                if(j.status==='nochange'){ alert('Изменений нет'); }
+                else if(j.status==='ok'){ alert('Сохранено'); }
+                else { alert('Ошибка при сохранении'); }
+              }catch(e){ console.error('saveRoute',e); alert('Ошибка сохранения'); }
+            };
+
+            // Скачать локально
+            window.downloadEdited = function(){
+              try{
+                document.querySelectorAll('#routeTable td.data').forEach(td=>{ clearMarks(td); });
+                const head = Array.from(document.querySelectorAll('#routeTable thead th')).map(th=>{
+                  let v = th.innerText || '';
+                  if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                  return v;
+                }).join(',');
+                const body = Array.from(document.querySelectorAll('#routeTable tbody tr')).map(tr=>{
+                  const cells = Array.from(tr.querySelectorAll('td.data')).map(td=>{
+                    let v = td.innerText || '';
+                    if(v.includes('"')||v.includes(',')||v.includes('\\n')) v='"'+v.replaceAll('"','""')+'"';
+                    return v;
+                  }).join(',');
+                  return cells;
+                });
+                const csv = [head, ...body].join('\\n');
+                const blob = new Blob(['\\ufeff'+csv], { type:'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display='none'; a.href=url; a.download='{NAME_H}';
+                document.body.appendChild(a); a.click();
+                setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 500);
+              }catch(e){ console.error('downloadEdited',e); alert('Не удалось скачать'); }
+            };
+
+            document.addEventListener('DOMContentLoaded', function(){
+              const map = [
+                ['btn-add', ()=>window.addRow()],
+                ['btn-del', ()=>window.deleteSelected()],
+                ['btn-save', ()=>window.saveRoute()],
+                ['btn-back', ()=>{ history.back(); }], // вернуться на индекс с раскрытым результатом (bfcache)
+                ['btn-download', ()=>window.downloadEdited()]
+              ];
+              map.forEach(([id,fn])=>{
+                const el=document.getElementById(id);
+                if(el) el.addEventListener('click', function(e){ e.preventDefault(); fn(); }, {passive:false});
+              });
+
+              const inp = document.getElementById('search');
+              if(inp){
+                const deb = debounce(window.searchTable, 120);
+                ['input','keyup','change','paste'].forEach(ev=> inp.addEventListener(ev, deb));
+              }
+              const clr = document.getElementById('btn-clear');
+              if(clr) clr.addEventListener('click', function(e){ e.preventDefault(); window.clearSearch(); }, {passive:false});
+            });
+          })();
         </script>
         </head>
         <body>
-          <div class='bar container'>
-            <button id='btn-download' type='button' class='btn-ok' onclick='downloadEdited()'>💾 Сохранить и скачать</button>
-            <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
+          <div class='toolbar container'>
+            <div class='actions'>
+              <button id='btn-add' type='button' class='btn-secondary'>➕ Добавить</button>
+              <button id='btn-del' type='button' class='btn-secondary'>🗑 Удалить пустые</button>
+              <button id='btn-save' type='button' class='btn-ok'>💾 Сохранить</button>
+              <button id='btn-back' type='button' class='btn-secondary'>← Назад</button>
+            </div>
+            <div class='searchRow'>
+              <input id='search' placeholder='Поиск…' />
+              <button id='btn-clear' type='button' class='btn-secondary'>✕</button>
+            </div>
           </div>
-          <div class='container'>
-            <h2>Редактирование маршрута: {NAME_H}</h2>
+
+          <div class='container' style='margin-top:12px'>
             {TABLE}
+            <div style='margin:16px 0'>
+              <button id='btn-download' type='button' class='btn-ok'>📥 Скачать CSV</button>
+            </div>
           </div>
         </body></html>
         """
         page = (page_tpl
                 .replace("{CSS}", BASE_CSS)
                 .replace("{JS}", BASE_JS)
+                .replace("{NAME_Q}", quote(filename))
                 .replace("{NAME_H}", html.escape(unquote(filename)))
                 .replace("{TABLE}", table_html)
                 )
@@ -585,7 +757,33 @@ async def edit_route(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     except Exception as e:
         return HTMLResponse(f"<pre>Ошибка: {html.escape(str(e))}</pre>")
 
-# === Скачать
+
+
+@app.post("/save_route/{filename:path}")
+async def save_route(filename: str, request: Request, _: HTTPBasicCredentials = Depends(auth)):
+    """
+    Сохраняет отредактированный маршрут в OUTPUT_DIR.
+    Возвращает {"status":"ok"} если файл изменился, или {"status":"nochange"} если контент совпал.
+    """
+    file_path = os.path.join(OUTPUT_DIR, unquote(filename))
+    body = await request.body()
+    text = body.decode('utf-8', errors='replace')
+
+    # если файл уже существует и текст идентичен — не переписываем
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                old = f.read()
+            if old == text:
+                return {"status": "nochange"}
+    except Exception:
+        pass
+
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(text)
+    return {"status": "ok"}
+
 @app.get("/download/{filename:path}")
 async def download(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     file_path = os.path.join(OUTPUT_DIR, unquote(filename))
