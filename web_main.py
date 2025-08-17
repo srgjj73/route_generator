@@ -293,14 +293,11 @@ async def process(pdf_file: UploadFile = File(...), reference_file: str = Form(.
 @app.get("/view_reference/{filename:path}", response_class=HTMLResponse)
 async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth)):
     """
-    Редактор справочника:
-    - Добавление/удаление строк;
-    - Поиск с подсветкой;
-    - Сохранение CSV (с заголовком).
-    Особенности:
-    - новые строки добавляются ВВЕРХ;
-    - NaN не выводятся (пусто);
-    - значения вида 123.0 показываем как 123 (убираем ".0" у индексов и id).
+    Редактор справочника (мобильный хедер):
+    - 4 кнопки в один ряд;
+    - поиск под кнопками + очистка;
+    - заголовок убран;
+    - вставка строк сверху; скрытие NaN; обрезка .0 у целых.
     """
     try:
         file_path = os.path.join(REF_DIR, unquote(filename))
@@ -310,19 +307,13 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
         df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
 
         def _fmt(v):
-            import math
-            # NaN -> ''
             if v is None: return ""
             try:
-                # pandas NaN/NaT
                 if pd.isna(v): return ""
             except Exception:
                 pass
-            # чистим .0 у целых float
-            if isinstance(v, float):
-                if v.is_integer():
-                    return str(int(v))
-            # строковый вариант: '123.0' -> '123'
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
             s = str(v)
             if s.endswith('.0') and s[:-2].isdigit():
                 return s[:-2]
@@ -340,16 +331,26 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
         <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
         {CSS}{JS}
         <style>
+          /* фиксируем первую колонку чекбоксов */
           #csvTable th:first-child, #csvTable td.sel{position:sticky; left:0; background:#fff; z-index:1;}
           #csvTable th:first-child{width:40px; text-align:center;}
           #csvTable td.sel{ text-align:center; }
+
+          /* новый верхний блок */
+          .toolbar{position:sticky;top:0;background:#fff;padding:12px 16px;z-index:5;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+          .actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+          .actions button{width:100%}
+          .searchRow{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:10px}
+          @media (max-width:420px){
+            .actions{grid-template-columns:repeat(4,1fr)}
+          }
         </style>
         <script>
           (function(){
             function headerCells(){ return Array.from(document.querySelectorAll('#csvTable thead th')).slice(1); }
             function dataRows(){ return Array.from(document.querySelectorAll('#csvTable tbody tr')); }
 
-            // ➕ добавляем строку ВВЕРХ (в начало tbody)
+            // вставка строки ВВЕРХ
             window.addRow = function(){
               try{
                 const cols = headerCells().length;
@@ -365,8 +366,7 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                   tr.appendChild(td);
                 }
                 const tbody = document.querySelector('#csvTable tbody');
-                const first = tbody.firstElementChild;
-                tbody.insertBefore(tr, first); // вставляем В ПЕРВУЮ позицию
+                tbody.insertBefore(tr, tbody.firstElementChild);
               }catch(e){ console.error('addRow error', e); alert('Не удалось добавить строку'); }
             };
 
@@ -400,6 +400,12 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
               }catch(e){ console.error('searchTable error', e); }
             };
 
+            window.clearSearch = function(){
+              const inp = document.getElementById('search');
+              if(!inp) return;
+              inp.value=''; window.searchTable(); inp.focus();
+            };
+
             window.saveCSV = async function(){
               try{
                 document.querySelectorAll('#csvTable td.data').forEach(td=>{ clearMarks(td); });
@@ -431,34 +437,45 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
             };
 
             document.addEventListener('DOMContentLoaded', function(){
-              var btnAdd = document.getElementById('btn-add');
-              var btnDel = document.getElementById('btn-del');
-              var btnSave = document.getElementById('btn-save');
-              if(btnAdd) btnAdd.addEventListener('click', function(e){ e.preventDefault(); window.addRow(); }, {passive:false});
-              if(btnDel) btnDel.addEventListener('click', function(e){ e.preventDefault(); window.deleteSelected(); }, {passive:false});
-              if(btnSave) btnSave.addEventListener('click', function(e){ e.preventDefault(); window.saveCSV(); }, {passive:false});
+              // биндим кнопки
+              const map = [
+                ['btn-add', ()=>window.addRow()],
+                ['btn-del', ()=>window.deleteSelected()],
+                ['btn-save', ()=>window.saveCSV()],
+                ['btn-back', ()=>{ location.href='/' }]
+              ];
+              map.forEach(([id,fn])=>{
+                const el=document.getElementById(id);
+                if(el) el.addEventListener('click', function(e){ e.preventDefault(); fn(); }, {passive:false});
+              });
 
+              // поиск с debounce
               const inp = document.getElementById('search');
               if(inp){
                 const deb = debounce(window.searchTable, 120);
                 ['input','keyup','change','paste'].forEach(ev=> inp.addEventListener(ev, deb));
               }
+              const clr = document.getElementById('btn-clear');
+              if(clr) clr.addEventListener('click', function(e){ e.preventDefault(); window.clearSearch(); }, {passive:false});
             });
           })();
         </script>
         </head>
         <body>
-          <div class='bar container'>
-            <input id='search' placeholder='Поиск…' />
-            <div class='row' style='gap:8px;'>
-              <button id='btn-add' type='button' class='btn-secondary'>➕ Добавить строку</button>
-              <button id='btn-del' type='button' class='btn-secondary'>🗑 Удалить выбранные</button>
+          <div class='toolbar'>
+            <div class='actions'>
+              <button id='btn-add' type='button' class='btn-secondary'>➕ Добавить</button>
+              <button id='btn-del' type='button' class='btn-secondary'>🗑 Удалить</button>
               <button id='btn-save' type='button' class='btn-ok'>💾 Сохранить</button>
-              <a href='/'><button type='button' class='btn-secondary'>⬅ Назад</button></a>
+              <button id='btn-back' type='button' class='btn-secondary'>← Назад</button>
+            </div>
+            <div class='searchRow'>
+              <input id='search' placeholder='Поиск…' />
+              <button id='btn-clear' type='button' class='btn-secondary'>✕</button>
             </div>
           </div>
-          <div class='container'>
-            <h2>Редактирование: {NAME_H}</h2>
+
+          <div class='container' style='margin-top:12px'>
             {TABLE}
           </div>
         </body></html>
@@ -467,7 +484,6 @@ async def view_reference(filename: str, _: HTTPBasicCredentials = Depends(auth))
                 .replace("{CSS}", BASE_CSS)
                 .replace("{JS}", BASE_JS)
                 .replace("{NAME_Q}", quote(filename))
-                .replace("{NAME_H}", html.escape(unquote(filename)))
                 .replace("{TABLE}", table_html)
                 )
         return HTMLResponse(page)
