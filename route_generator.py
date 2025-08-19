@@ -1,54 +1,85 @@
 import pdfplumber
 import pandas as pd
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import difflib
 import os
 
-
-def _extract_route_date_from_name(pdf_path: str) -> date:
-    name = os.path.basename(pdf_path)
-    m = re.search(r"(\d{2})_(\d{2})_(\d{4})", name)
-    if not m:
-        raise ValueError("❌ Не удалось извлечь дату из имени PDF-файла! Ожидаю шаблон DD_MM_YYYY в имени.")
-    day, month, year = map(int, m.groups())
-    return date(year, month, day)
+import holidays  # финские праздники: holidays.FI()  (pip install holidays)
 
 
-def _calc_route_num(route_date: date) -> int:
-    # колиство будних дней от route_date до конца месяца + 1
-    last_day = (route_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    route_num = 0
-    d = route_date
-    while d < last_day:
+# ---------- Рабочие дни Финляндии ----------
+
+def _fi_holidays(year: int):
+    """Возвращает набор праздников Финляндии на год."""
+    # библиотека holidays сама знает подвижные даты (Пасха и т.п.)
+    return holidays.FI(years=year)
+
+def _is_working_day_fi(d: date) -> bool:
+    """Будний день пн–пт и не праздник Финляндии."""
+    if d.weekday() >= 5:  # 5=суббота, 6=воскресенье
+        return False
+    return d not in _fi_holidays(d.year)
+
+def _next_working_day_fi(from_date: date) -> date:
+    """Следующий рабочий день Финляндии после from_date."""
+    d = from_date + timedelta(days=1)
+    while not _is_working_day_fi(d):
         d += timedelta(days=1)
-        if d.weekday() < 5:
-            route_num += 1
-    return route_num + 1  # маршрут в последний день месяца — №1
+    return d
 
+def _route_ordinal_for_next_workday(today_hel: date) -> int:
+    """
+    Порядковый номер следующего рабочего дня в ТЕКУЩЕМ месяце.
+    Пример: сегодня 13-й рабочий, значит следующий = 14.
+    """
+    target = _next_working_day_fi(today_hel)
+
+    # считаем рабочие дни с 1-го числа месяца по target включительно
+    start = target.replace(day=1)
+    n = 0
+    d = start
+    while d <= target:
+        if _is_working_day_fi(d):
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+# ---------- Основная логика генерации ----------
 
 def process_route(pdf_path: str, ref_path: str, output_dir: str) -> dict:
-    """Главная функция, которую вызывает веб-приложение.
+    """
+    Главная функция, которую вызывает веб-приложение.
     Возвращает словарь: found_count, total_count, not_found, output_file.
+
+    Изменения:
+    - Больше НЕ извлекаем дату из имени/контента PDF.
+    - Номер маршрута рассчитываем как порядковый номер СЛЕДУЮЩЕГО рабочего дня
+      текущего месяца по календарю Финляндии (будни + исключение праздников).
+    - Временная зона Europe/Helsinki.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # 🗓️ Дата и номер маршрута из имени PDF
-    route_date = _extract_route_date_from_name(pdf_path)
-    route_num = _calc_route_num(route_date)
+    # 1) Дата «сейчас» в Хельсинки и порядковый номер следующего рабочего дня
+    today_hel = datetime.now(ZoneInfo("Europe/Helsinki")).date()
+    route_num = _route_ordinal_for_next_workday(today_hel)
 
-    # 📘 Загружаем справочник
+    # 2) Загружаем справочник
     spravochnik = pd.read_csv(ref_path)
-    # Проверим обязательные колонки
     required_cols = ["Address Line 1", "Address Line 2", "City", "Postal Code"]
     missing = [c for c in required_cols if c not in spravochnik.columns]
     if missing:
         raise ValueError(f"В справочнике нет колонок: {missing}. Ожидаются: {required_cols}")
 
     # нормализованное имя для сопоставления
-    spravochnik["norm_name"] = spravochnik["Address Line 1"].astype(str).str.lower().str.strip()
+    spravochnik["norm_name"] = (
+        spravochnik["Address Line 1"].astype(str).str.lower().str.strip()
+    )
 
-    # 📄 Парсим PDF
+    # 3) Парсим PDF: строки формата
+    #    "<имя>   P12345678   <вес>   <шт>"
     entries = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -68,7 +99,7 @@ def process_route(pdf_path: str, ref_path: str, output_dir: str) -> dict:
                     "qty": qty,
                 })
 
-    # 🔍 Сопоставление со справочником
+    # 4) Сопоставление со справочником
     output_rows = []
     not_found = []
     total_qty = 0
@@ -90,7 +121,7 @@ def process_route(pdf_path: str, ref_path: str, output_dir: str) -> dict:
         else:
             not_found.append(e["original_name"])
 
-    # 💾 Имя и сохранение файла
+    # 5) Имя файла и сохранение
     filename = f"{route_num:02d}_{total_qty}шт_{round(total_weight, 2)}кг.csv"
     out_path = os.path.join(output_dir, filename)
     pd.DataFrame(output_rows).to_csv(out_path, index=False)

@@ -8,3 +8,5 @@ rapidfuzz
 pdfplumber
 requests
 requests
+holidays>=0.56
+tzdata>=2024.1
