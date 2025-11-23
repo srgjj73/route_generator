@@ -1,15 +1,16 @@
-FROM python:3.11.2 AS builder
+FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
+# Копируем requirements и устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -m venv .venv
-COPY requirements.txt ./
-RUN .venv/bin/pip install -r requirements.txt
-FROM python:3.11.2-slim
-WORKDIR /app
-COPY --from=builder /app/.venv .venv/
+# Копируем весь проект
 COPY . .
-CMD ["/app/.venv/bin/fastapi", "run"]
+
+# Открываем порт
+EXPOSE 8000
+
+# Запускаем приложение
+CMD ["uvicorn", "web_main:app", "--host", "0.0.0.0", "--port", "8000"]
