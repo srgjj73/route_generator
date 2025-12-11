@@ -1,10 +1,9 @@
-venv/
-__pycache__/
+.git
+.github
+venv
+__pycache__
 *.pyc
-*.pyo
-.git/
-.github/
-uploads/
-outputs/
+uploads
+outputs
 *.log
 .env

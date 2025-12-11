@@ -2,14 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Копируем requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект (включая references)
+# Копируем весь проект
 COPY . .
 
-# Создаём папки для работы
+# Проверяем, что references на месте
+RUN echo "Checking references folder:" && ls -la references/ || echo "References folder not found!"
+
 RUN mkdir -p uploads outputs
 
 EXPOSE 8000
