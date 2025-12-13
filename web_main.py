@@ -44,7 +44,7 @@ def auth(creds: HTTPBasicCredentials = Depends(security)):
 BASE_DIR = os.getenv("BASE_DIR", ".")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-REF_DIR = os.path.join(BASE_DIR, "data", "references")
+REF_DIR = os.path.join(BASE_DIR, "references")
 for d in (UPLOAD_DIR, OUTPUT_DIR, REF_DIR):
     os.makedirs(d, exist_ok=True)
 
